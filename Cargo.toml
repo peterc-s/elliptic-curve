@@ -5,5 +5,9 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1.0.93"
+modular_math = "0.1.6"
 num-bigint = { version = "0.4.6", features = ["rand"] }
+num-traits = "0.2.19"
+primitive-types = { version = "0.12.2", features = ["num-traits"] }
 rand = "0.8.5"
+

@@ -1,11 +1,13 @@
 extern crate num_bigint;
 extern crate rand;
 extern crate anyhow;
+extern crate modular_math;
 
-
-use num_bigint::{BigInt, BigUint, ToBigInt, RandomBits};
+use num_bigint::{BigUint, RandomBits};
 use rand::{CryptoRng, Rng};
 use anyhow::Result;
+use modular_math::mod_math::ModMath;
+use primitive_types::U256;
 
 fn gen_biguint256<T: Rng + CryptoRng>(rng: &mut T) -> BigUint {
     return rng.sample(RandomBits::new(256))
@@ -14,8 +16,8 @@ fn gen_biguint256<T: Rng + CryptoRng>(rng: &mut T) -> BigUint {
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[allow(dead_code)]
 struct Point {
-    x: BigUint,
-    y: BigUint,
+    x: U256,
+    y: U256,
 }
 
 #[derive(Clone, Debug)]
@@ -26,19 +28,25 @@ struct EllipticCurve {
 
 #[allow(dead_code)]
 impl Point {
-    fn new(x: BigUint, y: BigUint) -> Self {
+    fn new(x: U256, y: U256) -> Self {
+        Point { x, y }
+    }
+
+    fn new_from_curve(x: U256, p: &ModMath, curve: &EllipticCurve) -> Self {
+        let y = p.sqrt(x.pow(U256::from(3)) + U256::from(curve.a) * x + U256::from(curve.b)).unwrap();
+
         Point { x, y }
     }
 
     fn identity() -> Self {
         Point {
-            x: BigUint::ZERO,
-            y: BigUint::ZERO,
+            x: U256::zero(),
+            y: U256::zero(),
         }
     }
 
-    fn add(&self, other: &Point, curve: &EllipticCurve) -> Self {
-        if *self == *other {
+    fn add_curve(&self, other: &Point, p: &ModMath, curve: &EllipticCurve) -> Self {
+        if *self == *other || self.x == other.x {
             return self.double(curve);
         }
         if *self == Self::identity() {
@@ -48,7 +56,20 @@ impl Point {
             return other.clone();
         }
 
-        todo!()
+        let lambda = {
+            // y2 - y1 / x2 - x1
+            let numerator = p.sub(other.y, self.y);
+            let denominator = p.sub(other.x, self.x);
+            p.mul(numerator, p.inv(denominator).unwrap())
+        };
+
+        // x3 = \lambda^2 - x2 - x1
+        let x: U256 = p.sub(p.sub(p.exp(lambda, U256::from(2)), other.x), self.x);
+
+        // \lambda(x2 - x3)-y2
+        let y: U256 = p.sub(p.mul(lambda, p.sub(other.x, x)), other.y);
+
+        Point { x, y }
     }
 
     fn double(&self, curve: &EllipticCurve) -> Self {
@@ -56,58 +77,33 @@ impl Point {
     }
 }
 
-fn mod_add(a: &BigUint, b: &BigUint, p: &BigUint) -> BigUint {
-    ((a + b) % p + p) % p
-}
-
-fn mod_sub(a: &BigUint, b: &BigUint, p: &BigUint) -> BigUint {
-    // convert to signed incase a - b is negative, avoids wrapping.
-    let a_signed: &BigInt = &a.to_bigint().expect(format!("Unable to convert a: {} to BigInt.", a).as_str());
-    let b_signed: &BigInt = &b.to_bigint().expect(format!("Unable to convert b: {} to BigInt.", b).as_str());
-    let p_signed: &BigInt = &p.to_bigint().expect(format!("Unable to convert p: {} to BigInt.", p).as_str());
-
-    // modulo operation rather than remainder.
-    let result_signed: BigInt = ((a_signed - b_signed) % p_signed + p_signed) % p_signed;
-
-    // convert result back to uint, provided it is now positive
-    let result: BigUint = result_signed.to_biguint().expect(format!("Unable to convert result: {} to BigUint", result_signed).as_str());
-
-    result
-}
-
-fn mod_mul(a: &BigUint, b: &BigUint, p: &BigUint) -> BigUint {
-    ((a * b) % p + p) % p
-}
-
-fn mod_inv(a: &BigUint, p: &BigUint) -> BigUint {
-    a.modinv(p).expect(format!("Unable to find modular inverse of {} given modulus {}.", a, p).as_str())
-}
-
-fn mod_div(a: &BigUint, b: &BigUint, p: &BigUint) -> BigUint {
-    mod_mul(a, &mod_inv(b, p), p)
-}
-
-
 fn main() -> Result<()> {
-    let mut rng = rand::thread_rng();
-    let a: BigUint = gen_biguint256(&mut rng);
-    let b: BigUint = gen_biguint256(&mut rng);
-    let p: BigUint = BigUint::from(2u8).pow(256) - BigUint::from(189u8);
+    // let p: U256 = U256::MAX - U256::from(189u8);
+    let p = "97";
 
-    let secp256k1_curve = EllipticCurve {
-        a: 0,
-        b: 7,
+    let mod_p = ModMath::new(p);
+
+    println!("Prime is: {}", p);
+
+    let test_curve = EllipticCurve {
+        a: 2,
+        b: 3,
     };
 
-    let sub: BigUint = mod_sub(&a, &b, &p);
-    let add: BigUint = mod_add(&a, &b, &p);
-    let mul: BigUint = mod_mul(&a, &b, &p);
-    let inv: BigUint = mod_inv(&a, &p);
+    // let secp256k1_curve = EllipticCurve {
+    //     a: 0,
+    //     b: 7,
+    // };
 
-    println!("{}-{} (mod {}) = {}", a, b, p, sub);
-    println!("{}+{} (mod {}) = {}", a, b, p, add);
-    println!("{}*{} (mod {}) = {}", a, b, p, mul);
-    println!("mod inv {} given {}: {}", a, p, inv);
+    let curve_point_1 = Point::new_from_curve(U256::from(17u8), &mod_p, &test_curve);
+    let curve_point_2 = Point::new_from_curve(U256::from(95u8), &mod_p, &test_curve);
+
+    println!("Curve point 1: {}, {}", curve_point_1.x, curve_point_1.y);
+    println!("Curve point 2: {}, {}", curve_point_2.x, curve_point_2.y);
+
+    let curve_points_added = curve_point_1.add_curve(&curve_point_2, &mod_p, &test_curve);
+
+    println!("Curve points added: {}, {}", curve_points_added.x, curve_points_added.y);
 
     Ok(())
 }
