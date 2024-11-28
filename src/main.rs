@@ -1,7 +1,8 @@
-extern crate num_bigint;
 extern crate rand;
 extern crate anyhow;
 extern crate modular_math;
+extern crate primitive_types;
+extern crate pkcs8;
 
 use std::{fmt::Display, str::FromStr};
 
@@ -9,6 +10,13 @@ use rand::{CryptoRng, Rng};
 use anyhow::Result;
 use modular_math::mod_math::ModMath;
 use primitive_types::U256;
+use pkcs8::{
+    der::{
+        asn1::{Null, OctetStringRef}, AnyRef, EncodePem
+    }, spki::AlgorithmIdentifier, ObjectIdentifier, PrivateKeyInfo, SubjectPublicKeyInfo
+};
+
+const SECP256K1_OID: &str = "1.3.132.0.10";
 
 fn gen_u256_below<T: Rng + CryptoRng>(rng: &mut T, n: &U256) -> U256 {
     loop {
@@ -22,7 +30,6 @@ fn gen_u256_below<T: Rng + CryptoRng>(rng: &mut T, n: &U256) -> U256 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[allow(dead_code)]
 struct Point {
     x: U256,
     y: U256,
@@ -36,6 +43,7 @@ struct EllipticCurve {
 
 struct EllipticConfig {
     name: String,
+    oid: ObjectIdentifier,
     curve: EllipticCurve,
     prime: U256,
     mod_p: ModMath,
@@ -46,6 +54,7 @@ struct EllipticConfig {
 #[derive(Clone, Debug)]
 struct EllipticKeys {
     config_name: String,
+    config_oid: ObjectIdentifier,
     private: U256,
     public: Point,
 }
@@ -137,10 +146,11 @@ impl Point {
 }
 
 impl EllipticConfig {
-    fn new(name: String, curve: EllipticCurve, prime: U256, base_x: U256, order: U256) -> Option<Self> {
+    fn new(name: String, oid: ObjectIdentifier, curve: EllipticCurve, prime: U256, base_x: U256, order: U256) -> Option<Self> {
         let mod_p = ModMath::new(prime);
         Some(Self {
             name,
+            oid,
             base: Point::new_from_curve(base_x, &mod_p, &curve)?,
             curve,
             prime,
@@ -154,8 +164,9 @@ impl Display for EllipticConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "EllipticConfig:\n\tName:\n\t\t{}\n\tCurve:\n\t\t{:?}\n\tPrime:\n\t\t{}\n\tBase:\n\t\t{:?}\n\tOrder:\n\t\t{}",
+            "EllipticConfig:\n\tName:\n\t\t{}\n\tOID:\n\t\t{}\n\tCurve:\n\t\t{:?}\n\tPrime:\n\t\t{}\n\tBase:\n\t\t{:?}\n\tOrder:\n\t\t{}",
             self.name,
+            self.oid,
             self.curve,
             self.prime,
             self.base,
@@ -173,9 +184,84 @@ impl EllipticKeys {
 
         Self {
             config_name: config.name,
+            config_oid: config.oid,
             private,
             public,
         }
+    }
+
+    #[deprecated(since = "0.0.1", note="This method is incomplete.")]
+    fn pem_private(&self) -> String {
+        let private_key_bytes: [u8; 32] = {
+            let mut bytes = [0u8; 32];
+            self.private.to_little_endian(&mut bytes);
+            bytes
+        };
+
+        let public_key_x_bytes: [u8; 32] = {
+            let mut bytes = [0u8; 32];
+            self.public.x.to_little_endian(&mut bytes);
+            bytes
+        };
+
+        let public_key_y_bytes: [u8; 32] = {
+            let mut bytes = [0u8; 32];
+            self.public.y.to_little_endian(&mut bytes);
+            bytes
+        };
+
+        let mut full_public_key_bytes = [0u8; 64];
+        full_public_key_bytes[..32].copy_from_slice(&public_key_x_bytes);
+        full_public_key_bytes[32..].copy_from_slice(&public_key_y_bytes);
+
+        let algorithm_ident: AlgorithmIdentifier<AnyRef<'_>> = AlgorithmIdentifier {
+            oid: self.config_oid, // Use the curve-specific OID
+            parameters: Some(Null.into()),
+        };
+
+        let private_key_octet_string = OctetStringRef::new(&private_key_bytes)
+            .map_err(|e| format!("Failed to create octet string: {:?}", e)).unwrap();
+
+        let private_key_info = PrivateKeyInfo {
+            algorithm: algorithm_ident,
+            private_key: private_key_octet_string.into(),
+            public_key: Some(&full_public_key_bytes),
+        };
+
+        private_key_info.to_pem(pkcs8::LineEnding::CRLF).unwrap()
+    }
+
+    #[deprecated(since = "0.0.1", note="This method is incomplete.")]
+    fn pem_public(&self) -> String {
+        let public_key_x_bytes: [u8; 32] = {
+            let mut bytes = [0u8; 32];
+            self.public.x.to_little_endian(&mut bytes);
+            bytes
+        };
+
+        let public_key_y_bytes: [u8; 32] = {
+            let mut bytes = [0u8; 32];
+            self.public.y.to_little_endian(&mut bytes);
+            bytes
+        };
+
+        
+        
+        let mut full_public_key_bytes = [0u8; 64];
+        full_public_key_bytes[..32].copy_from_slice(&public_key_x_bytes);
+        full_public_key_bytes[32..].copy_from_slice(&public_key_y_bytes);
+        
+        let algorithm_ident: AlgorithmIdentifier<AnyRef<'_>> = AlgorithmIdentifier {
+            oid: self.config_oid, // Use the curve-specific OID
+            parameters: Some(Null.into()),
+        };
+
+        let public_key_info = SubjectPublicKeyInfo {
+            algorithm: algorithm_ident,
+            subject_public_key: full_public_key_bytes,
+        };
+
+        public_key_info.to_pem(pkcs8::LineEnding::CRLF).unwrap()
     }
 }
 
@@ -183,8 +269,9 @@ impl Display for EllipticKeys {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f, 
-            "EllipticKeys:\n\tConfig name:\n\t\t{}\n\tPrivate:\n\t\t{}\n\tPublic:\n\t\t{:?}",
+            "EllipticKeys:\n\tConfig name:\n\t\t{}\n\tOID:\n\t\t{}\n\tPrivate:\n\t\t{}\n\tPublic:\n\t\t{:?}",
             self.config_name,
+            self.config_oid,
             self.private,
             self.public
         )
@@ -199,12 +286,15 @@ fn main() -> Result<()> {
     let prime = U256::from_str("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F")?;
     let base_x = U256::from_str("79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798")?;
     let order = U256::from_str("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141")?;
+    let oid = ObjectIdentifier::from_str(SECP256K1_OID).unwrap();
 
-    let secp256k1 = EllipticConfig::new("secp256k1".to_string(), secp256k1_curve, prime, base_x, order).unwrap();
+    let secp256k1 = EllipticConfig::new("secp256k1".to_string(), oid, secp256k1_curve, prime, base_x, order).unwrap();
     println!("{}", secp256k1);
 
     let keys = EllipticKeys::generate(secp256k1);
     println!("{}", keys);
+
+    println!("PEM output:\n\n{}\n\n{}", keys.pem_private(), keys.pem_public());
 
     Ok(())
 }
